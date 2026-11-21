@@ -310,18 +310,88 @@ function BISListContextMenu:OnMenuClick(itemLink)
 	end
 end
 
--- Hook SetItemRef to catch item link clicks with Alt modifier
-local originalSetItemRef = SetItemRef
-function SetItemRef(link, text, button)
-	-- If Alt-clicking an item link, add to BIS list
-	if IsAltKeyDown() and string.find(link, "item:") then
-		local slotId = BISListContextMenu:GetItemSlot(link)
-		if slotId then
-			BISList:AddItem(link, slotId, "")
-			if BISListUI and BISListUI.Refresh and BISListUI:IsVisible() then
-				BISListUI:Refresh()
+-- Shared helper to add or toggle an item in BISList from any click or keybind
+function BISListContextMenu:AddOrToggleItem(itemLink, itemName, sourceInfo)
+	if not itemLink then return false end
+
+	if itemName == "" then
+		itemName = nil
+	end
+
+	local itemId = BISList:GetItemIdFromLink(itemLink)
+	if not itemId then
+		DebugLog("AddOrToggleItem: Could not extract item ID from link: " .. tostring(itemLink))
+		return false
+	end
+
+	local slotId = self:GetItemSlot(itemLink)
+	if slotId then
+		if BISList:ItemExistsInSlot(slotId, itemId) then
+			DebugLog("AddOrToggleItem: Item exists, removing")
+			BISList:RemoveItem(slotId, itemId)
+		else
+			if not itemName or string.find(itemName, "^item:") then
+				if AtlasLootTooltip and AtlasLootTooltip:IsVisible() and AtlasLootTooltipTextLeft1 then
+					itemName = AtlasLootTooltipTextLeft1:GetText()
+				end
+				if not itemName or itemName == "" then
+					local cachedName = GetItemInfo(itemId)
+					if cachedName then
+						itemName = cachedName
+					end
+				end
+			end
+			if itemName == "" then itemName = nil end
+
+			DebugLog("AddOrToggleItem: Adding item " .. tostring(itemId) .. " to slot " .. tostring(slotId))
+			BISList:AddItem(itemLink, slotId, itemName, sourceInfo)
+		end
+
+		if BISListUI and BISListUI.Refresh and BISListUI:IsVisible() then
+			BISListUI:Refresh()
+		end
+		return true
+	end
+
+	-- Slot couldn't be auto-resolved: either one-hand weapon, uncached, or non-equippable
+	local _, _, _, _, _, _, _, itemEquipLoc = GetItemInfo(itemId)
+	if itemEquipLoc == "INVTYPE_WEAPON" then
+		DebugLog("AddOrToggleItem: INVTYPE_WEAPON detected, showing slot selection dialog")
+		if not itemName or string.find(itemName, "^item:") then
+			if AtlasLootTooltip and AtlasLootTooltip:IsVisible() and AtlasLootTooltipTextLeft1 then
+				itemName = AtlasLootTooltipTextLeft1:GetText()
+			end
+			if not itemName or itemName == "" then
+				local cachedName = GetItemInfo(itemId)
+				if cachedName then
+					itemName = cachedName
+				end
 			end
 		end
+		if itemName == "" then itemName = nil end
+		self:ShowWeaponSlotDialog(itemLink, itemName, sourceInfo)
+		return true
+	elseif not itemEquipLoc then
+		DebugLog("AddOrToggleItem: Item data not cached, requesting from server")
+		if not self:RequestItemThenAdd(itemLink, itemName, sourceInfo) then
+			DEFAULT_CHAT_FRAME:AddMessage("|cffff0000BISList:|r Item data isn't loaded yet - hover the item again in a moment, or install ClassicAPI to have BISList fetch it automatically.")
+		end
+		return true
+	else
+		DebugLog("AddOrToggleItem: Item is not equippable (equipLoc: " .. tostring(itemEquipLoc) .. ")")
+		DEFAULT_CHAT_FRAME:AddMessage("|cffff0000BISList:|r That item doesn't appear to be equippable.")
+		return false
+	end
+end
+
+-- Hook SetItemRef to catch item link clicks with Ctrl+Alt modifier
+-- (Works for chat links, pfQuest browser items, InstanceJournal links, etc.)
+local originalSetItemRef = SetItemRef
+function SetItemRef(link, text, button)
+	-- If Ctrl+Alt-clicking an item link, add/toggle in BIS list
+	-- (Avoids plain Alt+Click which conflicts with other addons)
+	if IsControlKeyDown() and IsAltKeyDown() and link and string.find(link, "item:") then
+		BISListContextMenu:AddOrToggleItem(link, nil, nil)
 		return
 	end
 
@@ -329,26 +399,27 @@ function SetItemRef(link, text, button)
 	return originalSetItemRef(link, text, button)
 end
 
--- Hook GameTooltip to track hovered items from chat links
-local originalTooltipSetItem = GameTooltip.SetHyperlink
-GameTooltip.SetHyperlink = function(self, link)
-	originalTooltipSetItem(self, link)
+-- Helper to capture a GameTooltip item link and clear stale AtlasLoot source
+local function CaptureTooltipLink(link)
 	if link and string.find(link, "item:") then
 		lastHoveredItemLink = link
+		lastHoveredItemName = link
+		lastHoveredSourceInfo = nil
 	end
 end
 
--- Hook ChatEdit_InsertLink to intercept Shift+Alt+Click and fix raw item links
+-- Hook GameTooltip to track hovered items from chat/pfQuest links
+local originalTooltipSetItem = GameTooltip.SetHyperlink
+GameTooltip.SetHyperlink = function(self, link)
+	originalTooltipSetItem(self, link)
+	CaptureTooltipLink(link)
+end
+
+-- Hook ChatEdit_InsertLink to intercept Ctrl+Alt+Shift+Click and fix raw item links
 local originalChatEdit_InsertLink = ChatEdit_InsertLink
 function ChatEdit_InsertLink(link)
-	if IsAltKeyDown() and link and string.find(link, "item:") then
-		local slotId = BISListContextMenu:GetItemSlot(link)
-		if slotId then
-			BISList:AddItem(link, slotId, "")
-			if BISListUI and BISListUI.Refresh and BISListUI:IsVisible() then
-				BISListUI:Refresh()
-			end
-		end
+	if IsControlKeyDown() and IsAltKeyDown() and link and string.find(link, "item:") then
+		BISListContextMenu:AddOrToggleItem(link, nil, nil)
 		return
 	end
 
@@ -382,25 +453,15 @@ end
 local originalSetBagItem = GameTooltip.SetBagItem
 GameTooltip.SetBagItem = function(self, bag, slot)
 	local result = originalSetBagItem(self, bag, slot)
-	local link = GetContainerItemLink(bag, slot)
-	if link then
-		lastHoveredItemLink = link
-		-- The link itself is already the proper colored item link!
-		lastHoveredItemName = link
-	end
+	CaptureTooltipLink(GetContainerItemLink(bag, slot))
 	return result
 end
 
--- Hook GameTooltip:SetInventoryItem to capture equipped item hovers
+-- Hook GameTooltip:SetInventoryItem to capture equipped/inspect item hovers
 local originalSetInventoryItem = GameTooltip.SetInventoryItem
 GameTooltip.SetInventoryItem = function(self, unit, slot)
 	local result = originalSetInventoryItem(self, unit, slot)
-	local link = GetInventoryItemLink(unit, slot)
-	if link then
-		lastHoveredItemLink = link
-		-- The link itself is already the proper colored item link!
-		lastHoveredItemName = link
-	end
+	CaptureTooltipLink(GetInventoryItemLink(unit, slot))
 	return result
 end
 
@@ -408,19 +469,71 @@ end
 local originalSetLootItem = GameTooltip.SetLootItem
 GameTooltip.SetLootItem = function(self, slot)
 	local result = originalSetLootItem(self, slot)
-	local link = GetLootSlotLink(slot)
-	if link then
-		lastHoveredItemLink = link
-		-- The link itself is already the proper colored item link!
-		lastHoveredItemName = link
-	end
+	CaptureTooltipLink(GetLootSlotLink(slot))
 	return result
+end
+
+-- Hook additional standard GameTooltip setters (Quest, Merchant, Auction, LootRoll, Mail)
+if GameTooltip.SetQuestItem then
+	local orig = GameTooltip.SetQuestItem
+	GameTooltip.SetQuestItem = function(self, qtype, slot)
+		local result = orig(self, qtype, slot)
+		CaptureTooltipLink(GetQuestItemLink(qtype, slot))
+		return result
+	end
+end
+
+if GameTooltip.SetQuestLogItem then
+	local orig = GameTooltip.SetQuestLogItem
+	GameTooltip.SetQuestLogItem = function(self, qtype, slot)
+		local result = orig(self, qtype, slot)
+		CaptureTooltipLink(GetQuestLogItemLink(qtype, slot))
+		return result
+	end
+end
+
+if GameTooltip.SetMerchantItem then
+	local orig = GameTooltip.SetMerchantItem
+	GameTooltip.SetMerchantItem = function(self, slot)
+		local result = orig(self, slot)
+		CaptureTooltipLink(GetMerchantItemLink(slot))
+		return result
+	end
+end
+
+if GameTooltip.SetAuctionItem then
+	local orig = GameTooltip.SetAuctionItem
+	GameTooltip.SetAuctionItem = function(self, atype, index)
+		local result = orig(self, atype, index)
+		CaptureTooltipLink(GetAuctionItemLink(atype, index))
+		return result
+	end
+end
+
+if GameTooltip.SetLootRollItem then
+	local orig = GameTooltip.SetLootRollItem
+	GameTooltip.SetLootRollItem = function(self, rollId)
+		local result = orig(self, rollId)
+		CaptureTooltipLink(GetLootRollItemLink(rollId))
+		return result
+	end
+end
+
+if GameTooltip.SetInboxItem then
+	local orig = GameTooltip.SetInboxItem
+	GameTooltip.SetInboxItem = function(self, index, attachmentIndex)
+		local result = orig(self, index, attachmentIndex)
+		CaptureTooltipLink(GetInboxItemLink(index, attachmentIndex))
+		return result
+	end
 end
 
 -- Continuously check for AtlasLoot and other addon item tooltips
 local updateFrame = CreateFrame("Frame")
 local lastLoggedItemID = nil
 local lastLoggedFrame = nil
+local scanTimer = 0
+local SCAN_INTERVAL = 0.05
 
 updateFrame:SetScript("OnUpdate", function()
 	-- Handle hide timer countdown
@@ -437,154 +550,179 @@ updateFrame:SetScript("OnUpdate", function()
 
 	-- Check both GameTooltip and AtlasLootTooltip
 	local tooltipVisible = GameTooltip:IsVisible() or (AtlasLootTooltip and AtlasLootTooltip:IsVisible())
+	if not tooltipVisible then
+		scanTimer = 0
+		return
+	end
+
+	-- Reset hide timer since tooltip is visible
+	hideTimer = 0
+
+	-- Throttle per-frame tooltip inspection
+	scanTimer = scanTimer + arg1
+	if scanTimer < SCAN_INTERVAL then
+		return
+	end
+	scanTimer = 0
 
 	-- Debug: Log tooltip state periodically
-	if tooltipVisible and not lastLoggedItemID then
+	if not lastLoggedItemID then
 		DebugLog("Tooltip became visible")
 		DebugLog("  GameTooltip visible: " .. tostring(GameTooltip:IsVisible()))
 		DebugLog("  AtlasLootTooltip visible: " .. tostring(AtlasLootTooltip and AtlasLootTooltip:IsVisible()))
 	end
 
-	if tooltipVisible then
-		-- Reset hide timer since tooltip is visible
-		hideTimer = 0
+	-- Check mouse focus for AtlasLoot item buttons
+	local mouseFocus = GetMouseFocus()
+	local itemCaptured = false
 
-		-- Check mouse focus for AtlasLoot item buttons
-		local mouseFocus = GetMouseFocus()
-		local itemCaptured = false
-
-		-- Debug: Always log frame info when tooltip is visible (not just when frame changes)
-		if mouseFocus then
-			local frameName = mouseFocus:GetName() or "unnamed"
-			-- Only log if we haven't captured an item for this tooltip yet
-			if not lastLoggedItemID or lastLoggedItemID == "noitem" then
-				DebugLog("=== Tooltip visible, checking frame ===")
-				DebugLog("Frame name: " .. frameName)
-				DebugLog("Frame type: " .. (mouseFocus:GetObjectType() or "unknown"))
-				-- Always check for item-related properties when debugging
-				DebugLog("Checking properties:")
-				DebugLog("  itemID: " .. tostring(mouseFocus.itemID))
-				DebugLog("  link: " .. tostring(mouseFocus.link))
-				DebugLog("  itemLink: " .. tostring(mouseFocus.itemLink))
-				DebugLog("  itemIDName: " .. tostring(mouseFocus.itemIDName))
-				DebugLog("  lootpage: " .. tostring(mouseFocus.lootpage))
-				DebugLog("  buttoninfo: " .. tostring(mouseFocus.buttoninfo))
-				lastLoggedFrame = mouseFocus
-			end
-		else
-			if not lastLoggedItemID then
-				DebugLog("WARNING: Tooltip visible but no mouse focus!")
-			end
+	-- Debug: Always log frame info when tooltip is visible (not just when frame changes)
+	if mouseFocus then
+		local frameName = mouseFocus:GetName() or "unnamed"
+		-- Only log if we haven't captured an item for this tooltip yet
+		if not lastLoggedItemID or lastLoggedItemID == "noitem" then
+			DebugLog("=== Tooltip visible, checking frame ===")
+			DebugLog("Frame name: " .. frameName)
+			DebugLog("Frame type: " .. (mouseFocus:GetObjectType() or "unknown"))
+			-- Always check for item-related properties when debugging
+			DebugLog("Checking properties:")
+			DebugLog("  itemID: " .. tostring(mouseFocus.itemID))
+			DebugLog("  link: " .. tostring(mouseFocus.link))
+			DebugLog("  itemLink: " .. tostring(mouseFocus.itemLink))
+			DebugLog("  itemIDName: " .. tostring(mouseFocus.itemIDName))
+			DebugLog("  lootpage: " .. tostring(mouseFocus.lootpage))
+			DebugLog("  buttoninfo: " .. tostring(mouseFocus.buttoninfo))
+			lastLoggedFrame = mouseFocus
 		end
+	else
+		if not lastLoggedItemID then
+			DebugLog("WARNING: Tooltip visible but no mouse focus!")
+		end
+	end
 
-		if mouseFocus then
-			local rawID = nil
-			local itemID = nil
+	if mouseFocus then
+		local rawID = nil
+		local itemID = nil
 
-			-- Check for itemID (regular AtlasLoot items)
-			if mouseFocus.itemID then
-				rawID = tostring(mouseFocus.itemID)
-				-- If itemID has 's' prefix (set/special item), prefer dressingroomID as the real item ID
-				if string.find(rawID, "^s%d+$") and mouseFocus.dressingroomID then
-					itemID = tonumber(mouseFocus.dressingroomID)
-					DebugLog("Item has 's' prefix, using dressingroomID: " .. tostring(itemID))
-				else
-					-- Try direct conversion for regular numeric IDs
-					itemID = tonumber(rawID)
-					-- If that fails, extract from 's' prefix as fallback
-					if not itemID then
-						local _, _, numPart = string.find(rawID, "^s(%d+)$")
-						if numPart then
-							itemID = tonumber(numPart)
-							DebugLog("Extracted item ID from 's' prefix: " .. itemID)
-						end
+		-- Check for itemID (regular AtlasLoot items)
+		if mouseFocus.itemID then
+			rawID = tostring(mouseFocus.itemID)
+			-- If itemID has 's' prefix (set/special item), prefer dressingroomID as the real item ID
+			if string.find(rawID, "^s%d+$") and mouseFocus.dressingroomID then
+				itemID = tonumber(mouseFocus.dressingroomID)
+				DebugLog("Item has 's' prefix, using dressingroomID: " .. tostring(itemID))
+			else
+				-- Try direct conversion for regular numeric IDs
+				itemID = tonumber(rawID)
+				-- If that fails, extract from 's' prefix as fallback
+				if not itemID then
+					local _, _, numPart = string.find(rawID, "^s(%d+)$")
+					if numPart then
+						itemID = tonumber(numPart)
+						DebugLog("Extracted item ID from 's' prefix: " .. itemID)
 					end
 				end
-			-- Check for dressingroomID (container items like Tier Sets preview)
-			elseif mouseFocus.dressingroomID then
-				itemID = tonumber(mouseFocus.dressingroomID)
-				DebugLog("Found dressingroomID: " .. tostring(itemID))
+			end
+		-- Check for dressingroomID (container items like Tier Sets preview)
+		elseif mouseFocus.dressingroomID then
+			itemID = tonumber(mouseFocus.dressingroomID)
+			DebugLog("Found dressingroomID: " .. tostring(itemID))
+		end
+
+		if itemID and itemID ~= 0 then
+			-- Store the basic link format
+			lastHoveredItemLink = "item:" .. itemID .. ":0:0:0"
+			itemCaptured = true
+
+			-- Only log when item changes to avoid spam
+			if itemID ~= lastLoggedItemID then
+				DebugLog("MouseFocus itemID: " .. itemID)
+				DebugLog("  Frame name: " .. (mouseFocus:GetName() or "unnamed"))
+				DebugLog("  Link: " .. lastHoveredItemLink)
+				lastLoggedItemID = itemID
 			end
 
-			if itemID then
-				-- Store the basic link format
+			-- Capture item name from AtlasLoot database or GetItemInfo
+			if mouseFocus.itemIDName then
+				lastHoveredItemName = mouseFocus.itemIDName
+			else
+				local itemName = GetItemInfo(itemID)
+				if itemName then
+					lastHoveredItemName = itemName
+				else
+					lastHoveredItemName = nil
+				end
+			end
+
+			-- Capture source information if available
+			if mouseFocus.sourcePage then
+				lastHoveredSourceInfo = mouseFocus.sourcePage
+			elseif AtlasLootItemsFrame and AtlasLootItemsFrame.refresh then
+				local dataID = AtlasLootItemsFrame.refresh[1]
+				local dataSource = AtlasLootItemsFrame.refresh[2]
+				if dataID and dataSource then
+					lastHoveredSourceInfo = dataID .. "|" .. dataSource
+				end
+			end
+		end
+	end
+
+	-- AtlasLoot stores itemID directly on GameTooltip
+	if not itemCaptured then
+		if GameTooltip.itemID then
+			local itemID = tonumber(GameTooltip.itemID)
+			if itemID and itemID ~= 0 then
 				lastHoveredItemLink = "item:" .. itemID .. ":0:0:0"
+				lastHoveredSourceInfo = nil
 				itemCaptured = true
 
-				-- Only log when item changes to avoid spam
 				if itemID ~= lastLoggedItemID then
-					DebugLog("MouseFocus itemID: " .. itemID)
-					DebugLog("  Frame name: " .. (mouseFocus:GetName() or "unnamed"))
+					DebugLog("GameTooltip itemID: " .. itemID)
 					DebugLog("  Link: " .. lastHoveredItemLink)
 					lastLoggedItemID = itemID
 				end
-
-				-- Capture item name from AtlasLoot database or GetItemInfo
-				if mouseFocus.itemIDName then
-					lastHoveredItemName = mouseFocus.itemIDName
-				else
-					-- Try to get name from GetItemInfo for container items
-					local itemName = GetItemInfo(itemID)
-					if itemName then
-						lastHoveredItemName = itemName
-					else
-						lastHoveredItemName = nil
-					end
-				end
-
-				-- Capture source information if available
-				if AtlasLootItemsFrame and AtlasLootItemsFrame.refresh then
-					local dataID = AtlasLootItemsFrame.refresh[1]
-					local dataSource = AtlasLootItemsFrame.refresh[2]
-					if dataID and dataSource then
-						lastHoveredSourceInfo = dataID .. "|" .. dataSource
-					end
-				end
 			end
 		end
+	end
 
-		-- AtlasLoot stores itemID directly on GameTooltip
-		if not itemCaptured then
-			if GameTooltip.itemID then
-				local itemID = tonumber(GameTooltip.itemID)
-				if itemID then
-					-- Always use the constructed link format that will work
-					lastHoveredItemLink = "item:" .. itemID .. ":0:0:0"
-					itemCaptured = true
-
-					-- Only log when item changes
-					if itemID ~= lastLoggedItemID then
-						DebugLog("GameTooltip itemID: " .. itemID)
-						DebugLog("  Link: " .. lastHoveredItemLink)
-						lastLoggedItemID = itemID
-					end
-				end
-			end
+	-- Check common item link storage fields on mouse focus
+	if not itemCaptured and mouseFocus then
+		local itemLink = mouseFocus.link or mouseFocus.itemLink or mouseFocus.itemlink
+		if itemLink and string.find(itemLink, "item:") then
+			lastHoveredItemLink = itemLink
+			lastHoveredSourceInfo = nil
+			itemCaptured = true
 		end
+	end
 
-		-- Debug: Check if we failed to capture an item
-		if not itemCaptured and tooltipVisible and GameTooltip:NumLines() > 0 then
-			-- Only log once per tooltip show
-			if not lastLoggedItemID or lastLoggedItemID ~= "noitem" then
-				DebugLog("=== FAILED to capture item ===")
-				DebugLog("GameTooltip.itemID: " .. tostring(GameTooltip.itemID))
-				DebugLog("NumLines: " .. GameTooltip:NumLines())
-				if GameTooltipTextLeft1 then
-					DebugLog("Tooltip text: " .. tostring(GameTooltipTextLeft1:GetText()))
-				end
-				if mouseFocus then
-					DebugLog("MouseFocus: " .. tostring(mouseFocus:GetName()))
-				end
-				lastLoggedItemID = "noitem" -- Prevent spam
-			end
+	-- ClassicAPI fallback: GameTooltip:GetItem() covers any addon/frame using GameTooltip
+	if not itemCaptured and GameTooltip:IsVisible() and type(GameTooltip.GetItem) == "function" then
+		local _, gtLink, gtId = GameTooltip:GetItem()
+		if gtLink and string.find(gtLink, "item:") then
+			lastHoveredItemLink = gtLink
+			lastHoveredItemName = gtLink
+			lastHoveredSourceInfo = nil
+			itemCaptured = true
+		elseif gtId and gtId ~= 0 then
+			lastHoveredItemLink = "item:" .. gtId .. ":0:0:0"
+			lastHoveredSourceInfo = nil
+			itemCaptured = true
 		end
+	end
 
-		-- Check common item link storage fields on mouse focus
-		if mouseFocus then
-			local itemLink = mouseFocus.link or mouseFocus.itemLink or mouseFocus.itemlink
-			if itemLink and string.find(itemLink, "item:") then
-				lastHoveredItemLink = itemLink
+	-- Debug: Check if we failed to capture an item
+	if not itemCaptured and GameTooltip:NumLines() > 0 then
+		if not lastLoggedItemID or lastLoggedItemID ~= "noitem" then
+			DebugLog("=== FAILED to capture item ===")
+			DebugLog("GameTooltip.itemID: " .. tostring(GameTooltip.itemID))
+			DebugLog("NumLines: " .. GameTooltip:NumLines())
+			if GameTooltipTextLeft1 then
+				DebugLog("Tooltip text: " .. tostring(GameTooltipTextLeft1:GetText()))
 			end
+			if mouseFocus then
+				DebugLog("MouseFocus: " .. tostring(mouseFocus:GetName()))
+			end
+			lastLoggedItemID = "noitem"
 		end
 	end
 end)
@@ -614,91 +752,22 @@ function BISList_AddHoveredItem()
 	DebugLog("=== BISList_AddHoveredItem called ===")
 	DebugLog("lastHoveredItemLink: " .. tostring(lastHoveredItemLink))
 
-	if lastHoveredItemLink then
-		DebugLog("Calling GetItemSlot for: " .. lastHoveredItemLink)
-		local slotId = BISListContextMenu:GetItemSlot(lastHoveredItemLink)
-		DebugLog("GetItemSlot returned: " .. tostring(slotId))
-
-		if slotId then
-			-- Extract item ID
-			local itemId = BISList:GetItemIdFromLink(lastHoveredItemLink)
-			DebugLog("Item ID: " .. tostring(itemId))
-
-			if itemId then
-				-- Check if item already exists in the slot
-				if BISList:ItemExistsInSlot(slotId, itemId) then
-					-- Remove it
-					DebugLog("Item exists, removing")
-					BISList:RemoveItem(slotId, itemId)
-				else
-					-- Try to get proper item name from various sources
-					local itemName = lastHoveredItemName
-					if not itemName or itemName == "" or string.find(itemName, "^item:") then
-						-- Try AtlasLootTooltip first (for container items like Tier Sets)
-						if AtlasLootTooltip and AtlasLootTooltip:IsVisible() and AtlasLootTooltipTextLeft1 then
-							itemName = AtlasLootTooltipTextLeft1:GetText()
-						end
-						-- Fallback to GetItemInfo cache
-						if not itemName or itemName == "" then
-							local cachedName, cachedLink = GetItemInfo(itemId)
-							if cachedName then
-								itemName = cachedName
-							end
-						end
-					end
-
-					-- Add it with captured name and source info
-					DebugLog("Item doesn't exist, adding")
-					DebugLog("  Name: " .. tostring(itemName))
-					DebugLog("  Source: " .. tostring(lastHoveredSourceInfo))
-					BISList:AddItem(lastHoveredItemLink, slotId, itemName, lastHoveredSourceInfo)
-				end
-
-				-- Refresh UI if visible
-				if BISListUI and BISListUI.Refresh and BISListUI:IsVisible() then
-					BISListUI:Refresh()
-				end
-			else
-				DebugLog("ERROR: Could not extract item ID from link")
-			end
-		else
-			-- Check if it's a one-hand weapon (INVTYPE_WEAPON) that needs slot selection
-			local itemId = BISList:GetItemIdFromLink(lastHoveredItemLink)
-			if itemId then
-				local _, _, _, _, _, _, _, itemEquipLoc = GetItemInfo(itemId)
-				if itemEquipLoc == "INVTYPE_WEAPON" then
-					DebugLog("One-hand weapon detected, showing slot selection dialog")
-					-- Get item name for the dialog
-					local itemName = lastHoveredItemName
-					if not itemName or itemName == "" or string.find(itemName, "^item:") then
-						if AtlasLootTooltip and AtlasLootTooltip:IsVisible() and AtlasLootTooltipTextLeft1 then
-							itemName = AtlasLootTooltipTextLeft1:GetText()
-						end
-						if not itemName or itemName == "" then
-							local cachedName = GetItemInfo(itemId)
-							if cachedName then
-								itemName = cachedName
-							end
-						end
-					end
-					BISListContextMenu:ShowWeaponSlotDialog(lastHoveredItemLink, itemName, lastHoveredSourceInfo)
-				elseif not itemEquipLoc then
-					-- GetItemInfo returned nothing at all, which means the
-					-- item isn't in the local cache yet rather than that it's
-					-- unequippable. With ClassicAPI we can ask the server for
-					-- it and complete the add when the data lands, instead of
-					-- failing silently.
-					DebugLog("Item data not cached, requesting from server")
-					if not BISListContextMenu:RequestItemThenAdd(lastHoveredItemLink, lastHoveredItemName, lastHoveredSourceInfo) then
-						DEFAULT_CHAT_FRAME:AddMessage("|cffff0000BISList:|r Item data isn't loaded yet - hover the item again in a moment, or install ClassicAPI to have BISList fetch it automatically.")
-					end
-				else
-					DebugLog("ERROR: GetItemSlot returned nil - cannot determine slot (equipLoc: " .. tostring(itemEquipLoc) .. ")")
-				end
-			else
-				DebugLog("ERROR: GetItemSlot returned nil - cannot determine slot")
-			end
+	-- Live fallback via ClassicAPI GameTooltip:GetItem() in case key was pressed
+	-- before the 0.05s OnUpdate scan ran
+	if not lastHoveredItemLink and GameTooltip:IsVisible() and type(GameTooltip.GetItem) == "function" then
+		local _, gtLink, gtId = GameTooltip:GetItem()
+		if gtLink and string.find(gtLink, "item:") then
+			lastHoveredItemLink = gtLink
+			lastHoveredItemName = gtLink
+			lastHoveredSourceInfo = nil
+		elseif gtId and gtId ~= 0 then
+			lastHoveredItemLink = "item:" .. gtId .. ":0:0:0"
+			lastHoveredSourceInfo = nil
 		end
+	end
+
+	if lastHoveredItemLink then
+		BISListContextMenu:AddOrToggleItem(lastHoveredItemLink, lastHoveredItemName, lastHoveredSourceInfo)
 	else
 		DebugLog("ERROR: No item link captured (lastHoveredItemLink is nil)")
 	end
@@ -784,19 +853,95 @@ SlashCmdList["BISCHECK"] = function(msg)
 	end
 end
 
+-- Hook AtlasLoot item clicks so Ctrl+Alt+Click adds to BISList instead of AtlasLoot WishList
+local atlasLootHooked = false
+local function HookAtlasLoot()
+	if atlasLootHooked then return end
+	if type(AtlasLoot) ~= "table" then return end
+
+	if type(AtlasLoot.Item_OnClick) == "function" then
+		local origItemOnClick = AtlasLoot.Item_OnClick
+		AtlasLoot.Item_OnClick = function(self, button)
+			if IsControlKeyDown() and IsAltKeyDown() and self then
+				local rawID = self.itemID and tostring(self.itemID) or ""
+				-- Skip pure enchant entries ("e1234"), handle items & crafted spells ("s1234")
+				if not string.find(rawID, "^e%d+$") then
+					local itemID = nil
+					if string.find(rawID, "^s%d+$") and self.dressingroomID and tonumber(self.dressingroomID) ~= 0 then
+						itemID = tonumber(self.dressingroomID)
+					else
+						itemID = tonumber(rawID)
+					end
+					if (not itemID or itemID == 0) and self.dressingroomID then
+						itemID = tonumber(self.dressingroomID)
+					end
+					if itemID and itemID ~= 0 then
+						local sourceInfo = self.sourcePage
+						if not sourceInfo and AtlasLootItemsFrame and AtlasLootItemsFrame.refresh then
+							local dataID = AtlasLootItemsFrame.refresh[1]
+							local dataSource = AtlasLootItemsFrame.refresh[2]
+							if dataID and dataSource then
+								sourceInfo = dataID .. "|" .. dataSource
+							end
+						end
+						local itemName = self.itemIDName or (self._Name and self._Name:GetText())
+						BISListContextMenu:AddOrToggleItem("item:" .. itemID .. ":0:0:0", itemName, sourceInfo)
+						return
+					end
+				end
+			end
+			return origItemOnClick(self, button)
+		end
+	end
+
+	if type(AtlasLoot.ContainerItem_OnClick) == "function" then
+		local origContainerOnClick = AtlasLoot.ContainerItem_OnClick
+		AtlasLoot.ContainerItem_OnClick = function(self, button)
+			if IsControlKeyDown() and IsAltKeyDown() and self then
+				local itemID = tonumber(self.itemID)
+				if itemID and itemID ~= 0 then
+					local sourceInfo = self.sourcePage
+					if not sourceInfo and AtlasLootItemsFrame and AtlasLootItemsFrame.refresh then
+						local dataID = AtlasLootItemsFrame.refresh[1]
+						local dataSource = AtlasLootItemsFrame.refresh[2]
+						if dataID and dataSource then
+							sourceInfo = dataID .. "|" .. dataSource
+						end
+					end
+					local itemName = GetItemInfo(itemID)
+					BISListContextMenu:AddOrToggleItem("item:" .. itemID .. ":0:0:0", itemName, sourceInfo)
+					return
+				end
+			end
+			return origContainerOnClick(self, button)
+		end
+	end
+
+	atlasLootHooked = true
+end
+
 -- Hook into the UI
 local hookFrame = CreateFrame("Frame")
 hookFrame:RegisterEvent("PLAYER_LOGIN")
+hookFrame:RegisterEvent("ADDON_LOADED")
 hookFrame:SetScript("OnEvent", function()
-	if event == "PLAYER_LOGIN" then
-		-- Set default keybinding if none is set
+	if event == "ADDON_LOADED" and arg1 == "AtlasLoot" then
+		HookAtlasLoot()
+	elseif event == "PLAYER_LOGIN" then
+		HookAtlasLoot()
+
+		-- Set default keybinding to ALT-SHIFT-B (avoids ALT-B bag conflict) if none is set
 		local key1, key2 = GetBindingKey("BISLIST_ADD")
 		if not key1 and not key2 then
-			SetBinding("ALT-B", "BISLIST_ADD")
-			SaveBindings(GetCurrentBindingSet())
-			DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00BISList:|r Loaded! Default keybind set to ALT-B. Hover items and press ALT-B to add to your list, or use /bis to view.")
-		else
-			DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00BISList:|r Loaded! Hover items and press ALT-B to add to your list, or use /bis to view.")
+			local existing = GetBindingAction("ALT-SHIFT-B")
+			if not existing or existing == "" then
+				SetBinding("ALT-SHIFT-B", "BISLIST_ADD")
+				SaveBindings(GetCurrentBindingSet())
+				key1 = "ALT-SHIFT-B"
+			end
 		end
+
+		local activeKey = key1 or key2 or "unbound"
+		DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00BISList:|r Loaded! Use |cffffffffCtrl+Alt+Click|r (AtlasLoot/pfQuest/chat) or hover + |cffffffff" .. activeKey .. "|r to add/remove items, or |cffffffff/bis|r to view.")
 	end
 end)

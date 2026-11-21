@@ -293,6 +293,9 @@ function BISList:AddItem(itemLink, slotId, itemName, sourceInfo)
 	end
 
 	-- Add the item
+	if itemName == "" then
+		itemName = nil
+	end
 	local itemData = {
 		itemId = itemId,
 		itemLink = itemLink,
@@ -402,7 +405,8 @@ function BISList:IsItemAcquired(itemId)
 	-- Check bags
 	if not acquired then
 		for bag = 0, 4 do
-			for slot = 1, GetContainerNumSlots(bag) do
+			local numSlots = GetContainerNumSlots(bag) or 0
+			for slot = 1, numSlots do
 				local link = GetContainerItemLink(bag, slot)
 				if link then
 					local bagItemId = self:GetItemIdFromLink(link)
@@ -422,7 +426,8 @@ function BISList:IsItemAcquired(itemId)
 	if not acquired and BankFrame and BankFrame:IsVisible() then
 		bankChecked = true
 
-		for slot = 1, GetContainerNumSlots(-1) do
+		local bankSlots = GetContainerNumSlots(-1) or 0
+		for slot = 1, bankSlots do
 			local link = GetContainerItemLink(-1, slot)
 			if link then
 				local bankItemId = self:GetItemIdFromLink(link)
@@ -436,7 +441,8 @@ function BISList:IsItemAcquired(itemId)
 		-- Check bank bags
 		if not acquired then
 			for bag = 5, 10 do
-				for slot = 1, GetContainerNumSlots(bag) do
+				local numSlots = GetContainerNumSlots(bag) or 0
+				for slot = 1, numSlots do
 					local link = GetContainerItemLink(bag, slot)
 					if link then
 						local bankItemId = self:GetItemIdFromLink(link)

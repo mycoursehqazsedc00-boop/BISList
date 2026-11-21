@@ -1048,9 +1048,9 @@ function BISListUI:ShowEmptyStateMessage(parent)
     instructions:SetWidth(600)
     instructions:SetJustifyH("CENTER")
     instructions:SetText("|cffaaaaaa" ..
-        "1. Ensure you have set a keybind in ESC > Key Bindings > BISList.\n\n" ..
-        "2. Hover over any item.\n\n" ..
-        "3. Use customized keybinding to add item to currently selected list." ..
+        "1. Ctrl+Alt+Click an item in AtlasLoot, pfQuest, or chat links.\n\n" ..
+        "2. Or hover over any item and press ALT-SHIFT-B (rebindable in ESC > Key Bindings > BISList).\n\n" ..
+        "3. Repeating the combo on a listed item removes it from the current list." ..
         "|r")
 
     table.insert(contentFrames, messageFrame)
