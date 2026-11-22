@@ -859,16 +859,24 @@ local function HookAtlasLoot()
 	if atlasLootHooked then return end
 	if type(AtlasLoot) ~= "table" then return end
 
-	if type(AtlasLoot.Item_OnClick) == "function" then
-		local origItemOnClick = AtlasLoot.Item_OnClick
-		AtlasLoot.Item_OnClick = function(self, button)
-			if IsControlKeyDown() and IsAltKeyDown() and self then
+	if type(AtlasLoot.ItemButton_OnClick) == "function" then
+		local origItemOnClick = AtlasLoot.ItemButton_OnClick
+		AtlasLoot.ItemButton_OnClick = function(self, button)
+			if IsControlKeyDown() and IsAltKeyDown() and self and not self.lootpage then
 				local rawID = self.itemID and tostring(self.itemID) or ""
 				-- Skip pure enchant entries ("e1234"), handle items & crafted spells ("s1234")
-				if not string.find(rawID, "^e%d+$") then
+				if rawID ~= "" and rawID ~= "0" and not string.find(rawID, "^e%d+$") then
 					local itemID = nil
-					if string.find(rawID, "^s%d+$") and self.dressingroomID and tonumber(self.dressingroomID) ~= 0 then
-						itemID = tonumber(self.dressingroomID)
+					if string.find(rawID, "^s%d+$") then
+						if self.dressingroomID and tonumber(self.dressingroomID) and tonumber(self.dressingroomID) ~= 0 then
+							itemID = tonumber(self.dressingroomID)
+						elseif GetSpellInfoAtlasLootDB and GetSpellInfoAtlasLootDB["craftspells"] then
+							local _, _, spellNum = string.find(rawID, "^s(%d+)$")
+							local spellEntry = spellNum and GetSpellInfoAtlasLootDB["craftspells"][tonumber(spellNum)]
+							if spellEntry and spellEntry["craftItem"] then
+								itemID = tonumber(spellEntry["craftItem"])
+							end
+						end
 					else
 						itemID = tonumber(rawID)
 					end
@@ -884,7 +892,14 @@ local function HookAtlasLoot()
 								sourceInfo = dataID .. "|" .. dataSource
 							end
 						end
-						local itemName = self.itemIDName or (self._Name and self._Name:GetText())
+						local itemName = self.itemIDName
+						if not itemName and self._Name and self._Name.GetText then
+							itemName = self._Name:GetText()
+							if itemName then
+								itemName = string.gsub(itemName, "|c%x%x%x%x%x%x%x%x", "")
+								itemName = string.gsub(itemName, "|r", "")
+							end
+						end
 						BISListContextMenu:AddOrToggleItem("item:" .. itemID .. ":0:0:0", itemName, sourceInfo)
 						return
 					end
